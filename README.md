@@ -142,6 +142,11 @@ docs/
 models/
   trained YOLO model
 ```
+## Testing
+
+I also included a testing checklist for the full prototype behavior, including startup, tracking, lost-target behavior, servo movement, latency, edge limits, long-run stability, and thermal checks.
+
+See: [Testing Checklist](docs/testing.md)
 
 ## Notes
 

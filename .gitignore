@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# YOLO training outputs
+runs/
+wandb/
+
+# Raw datasets
+raw_images/
+makesense_labels/
+dataset/
+
+# Large temporary video files
+*.mp4
+*.mov
+
+# Secrets
+.env
+secrets.py

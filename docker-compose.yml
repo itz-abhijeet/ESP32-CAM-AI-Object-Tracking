@@ -1,0 +1,26 @@
+services:
+  esp32-tracker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: esp32_ai_tracker
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Video stream URL from ESP32-CAM
+      - CAMERA_URL=${CAMERA_URL:-http://192.168.1.50:81/stream}
+      # Serial port connected to controller ESP32 (e.g., /dev/ttyUSB0 on Linux)
+      - SERIAL_PORT=${SERIAL_PORT:-/dev/ttyUSB0}
+      # Model file path (relative to /app/python or absolute)
+      - MODEL_PATH=${MODEL_PATH:-../models/best.pt}
+      # Run headless in container (no GUI window)
+      - HEADLESS=${HEADLESS:-true}
+      # Invert servo direction signs if needed (-1 or 1)
+      - PAN_SIGN=${PAN_SIGN:--1}
+      - TILT_SIGN=${TILT_SIGN:--1}
+    volumes:
+      - ./python:/app/python
+      - ./models:/app/models
+    # Uncomment the devices section if passing a physical USB serial port on Linux
+    # devices:
+    #   - "/dev/ttyUSB0:/dev/ttyUSB0"

@@ -1,24 +1,35 @@
+import os
 import cv2
 import serial
 import time
 import threading
 import math
+from pathlib import Path
+from dotenv import load_dotenv
 from ultralytics import YOLO
+
+# Load .env from python directory or project root
+load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 # SETTINGS
 
 # Path to the trained YOLO model
-MODEL_PATH = "../models/best.pt"
+MODEL_PATH = os.getenv("MODEL_PATH", "../models/best.pt")
 
 # Example on macOS: "/dev/cu.usbserial-XXXX"
 # Example on Windows: "COM3"
-SERIAL_PORT = "YOUR_SERIAL_PORT"
+# Example on Linux / Docker: "/dev/ttyUSB0"
+SERIAL_PORT = os.getenv("SERIAL_PORT", "YOUR_SERIAL_PORT")
 
 # Replace with your ESP32-CAM stream URL
-CAMERA_URL = "http://YOUR_ESP32_CAM_IP:81/stream"
+CAMERA_URL = os.getenv("CAMERA_URL", "http://YOUR_ESP32_CAM_IP:81/stream")
 
-PAN_SIGN = -1
-TILT_SIGN = -1
+# Set HEADLESS=true in Docker or server environments without a display
+HEADLESS = os.getenv("HEADLESS", "false").lower() in ("true", "1", "yes")
+
+PAN_SIGN = int(os.getenv("PAN_SIGN", "-1"))
+TILT_SIGN = int(os.getenv("TILT_SIGN", "-1"))
 
 # Recognition settings
 IMG_SIZE = 320
@@ -511,18 +522,21 @@ while True:
             print("No target")
         last_status_time = now
 
-    cv2.imshow("YOLO Object Tracking - SMOOTH CENTER", frame)
+    if not HEADLESS:
+        cv2.imshow("YOLO Object Tracking - SMOOTH CENTER", frame)
+        key = cv2.waitKey(1) & 0xFF
 
-    key = cv2.waitKey(1) & 0xFF
+        if key == ord("c"):
+            ser.write(b"C\n")
+            reset_tracking_state()
+            center_hold_until = time.time() + CENTER_HOLD_SECONDS
+            print("CENTER")
 
-    if key == ord("c"):
-        ser.write(b"C\n")
-        reset_tracking_state()
-        center_hold_until = time.time() + CENTER_HOLD_SECONDS
-        print("CENTER")
-
-    elif key == ord("q"):
-        break
+        elif key == ord("q"):
+            break
+    else:
+        # Prevent spinning in 100% CPU loop when headless
+        time.sleep(0.005)
 
 
 try:
@@ -533,4 +547,5 @@ except Exception:
 
 reader.stop()
 ser.close()
-cv2.destroyAllWindows()
+if not HEADLESS:
+    cv2.destroyAllWindows()

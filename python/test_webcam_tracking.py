@@ -5,6 +5,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 from ultralytics import YOLO
 
+import sys
+import threading
+
 # Load .env from python directory or project root
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
@@ -13,20 +16,63 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 # TEST SETTINGS (NO HARDWARE REQUIRED)
 # ==========================================
 
-# 0 is usually the default laptop/USB webcam
-CAMERA_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
+# Support URL or index from CLI arguments or environment variables:
+# e.g., CAMERA_SOURCE=http://10.220.217.17:81/stream or CAMERA_INDEX=0
+def get_camera_source():
+    # 1. Check CLI arguments (e.g., python test_webcam_tracking.py http://10.220.217.17:81/)
+    for arg in sys.argv[1:]:
+        if not arg.startswith("-"):
+            return arg
+        if arg.startswith("--source=") or arg.startswith("--url="):
+            return arg.split("=", 1)[1]
+
+    # 2. Check CAMERA_SOURCE or CAMERA_URL or CAMERA_INDEX from environment
+    env_source = os.getenv("CAMERA_SOURCE")
+    if env_source:
+        return env_source
+
+    env_url = os.getenv("CAMERA_URL")
+    if env_url and "YOUR_ESP32_CAM_IP" not in env_url:
+        return env_url
+
+    return os.getenv("CAMERA_INDEX", "0")
+
+CAMERA_SOURCE_RAW = get_camera_source()
+
+# Determine if source is an integer index or a URL
+def normalize_camera_source(source_str):
+    source_str = str(source_str).strip()
+    if source_str.isdigit():
+        return int(source_str)
+    # If it is an ESP32-CAM base URL like http://10.220.217.17:81/ or http://10.220.217.17:81
+    if source_str.startswith("http://") or source_str.startswith("https://"):
+        if source_str.endswith(":81") or source_str.endswith(":81/"):
+            return source_str.rstrip("/") + "/stream"
+    return source_str
+
+CAMERA_SOURCE = normalize_camera_source(CAMERA_SOURCE_RAW)
 
 # MODEL SELECTION:
 # - Set to "yolov8n.pt" to track everyday objects (person, cell phone, cup, bottle, etc.)
-# - Set to "../models/best.pt" to track the custom 3D printed target object
-USE_STANDARD_MODEL = os.getenv("USE_STANDARD_MODEL", "true").lower() in ("true", "1", "yes")
+# - Set to "../models/bestmain.pt" to track the custom 3D printed target object
+USE_STANDARD_MODEL = os.getenv("USE_STANDARD_MODEL", "false").lower() in ("true", "1", "yes")
 
 if USE_STANDARD_MODEL:
     MODEL_PATH = os.getenv("TEST_MODEL_PATH", "yolov8n.pt")  # Standard YOLOv8 nano model
     TARGET_CLASS = os.getenv("TARGET_CLASS", "cell phone")
 else:
-    MODEL_PATH = os.getenv("MODEL_PATH", "../models/best.pt")  # Custom trained model
+    MODEL_PATH = os.getenv("MODEL_PATH", "../models/bestmain.pt")  # Custom trained model
     TARGET_CLASS = os.getenv("TARGET_CLASS", "target_object")
+
+_model_path_obj = Path(MODEL_PATH)
+if not _model_path_obj.is_absolute() and not _model_path_obj.exists():
+    if (Path(__file__).resolve().parent / MODEL_PATH).exists():
+        _model_path_obj = Path(__file__).resolve().parent / MODEL_PATH
+    elif (Path(__file__).resolve().parent.parent / MODEL_PATH).exists():
+        _model_path_obj = Path(__file__).resolve().parent.parent / MODEL_PATH
+    elif (Path(__file__).resolve().parent.parent / "models" / Path(MODEL_PATH).name).exists():
+        _model_path_obj = Path(__file__).resolve().parent.parent / "models" / Path(MODEL_PATH).name
+MODEL_PATH = _model_path_obj
 
 # Camera feed & Recognition resolution
 FRAME_W = int(os.getenv("FRAME_W", "640"))
@@ -110,6 +156,104 @@ def smooth_command(raw_cmd, last_cmd, cmd_alpha, max_chg, osc_ignore):
     smoothed = int(round(last_cmd + cmd_alpha * (raw_cmd - last_cmd)))
     return limit_change(smoothed, last_cmd, max_chg)
 
+import socket
+import urllib.request
+import numpy as np
+
+# ==========================================
+# LOW LATENCY CAMERA READER FOR NETWORK STREAMS
+# ==========================================
+
+class LatestFrameReader:
+    def __init__(self, url):
+        self.url = url
+        self.host = None
+        self.port = 81
+        self.path = "/stream"
+
+        if "://" in url:
+            netloc = url.split("://", 1)[1]
+            if "/" in netloc:
+                host_port, self.path = netloc.split("/", 1)
+                self.path = "/" + self.path
+            else:
+                host_port = netloc
+            if ":" in host_port:
+                self.host, port_str = host_port.split(":", 1)
+                self.port = int(port_str)
+            else:
+                self.host = host_port
+                self.port = 80
+        else:
+            self.host = url
+
+        self.capture_url = f"http://{self.host}:80/capture"
+        self.frame = None
+        self.lock = threading.Lock()
+        self.running = False
+        self.thread = None
+
+    def start(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def _stream_socket(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3.0)
+        s.connect((self.host, self.port))
+        req = f"GET {self.path} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        s.sendall(req.encode())
+
+        buffer = b""
+        while self.running:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buffer += chunk
+            a = buffer.find(b"\xff\xd8")
+            b = buffer.find(b"\xff\xd9")
+            if a != -1 and b != -1:
+                if b > a:
+                    jpg = buffer[a:b+2]
+                    buffer = buffer[b+2:]
+                    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        with self.lock:
+                            self.frame = frame
+                else:
+                    buffer = buffer[a:]
+        s.close()
+
+    def _loop(self):
+        while self.running:
+            try:
+                self._stream_socket()
+            except Exception:
+                # Fallback to /capture endpoint if streaming port is busy
+                try:
+                    req = urllib.request.Request(self.capture_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=1.5) as resp:
+                        arr = np.frombuffer(resp.read(), dtype=np.uint8)
+                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            with self.lock:
+                                self.frame = frame
+                except Exception:
+                    time.sleep(0.05)
+            time.sleep(0.005)
+
+    def read(self):
+        with self.lock:
+            if self.frame is None:
+                return None
+            return self.frame.copy()
+
+    def stop(self):
+        self.running = False
+        if self.thread is not None:
+            self.thread.join(timeout=1.0)
+
 # ==========================================
 # MAIN TEST LOOP
 # ==========================================
@@ -126,16 +270,47 @@ def main():
     if TARGET_CLASS:
         print(f"Tracking target: '{TARGET_CLASS}'")
 
-    print(f"\nOpening webcam index {CAMERA_INDEX}...")
-    cap = cv2.VideoCapture(CAMERA_INDEX)
+    is_network_stream = isinstance(CAMERA_SOURCE, str) and (
+        CAMERA_SOURCE.startswith("http://") or CAMERA_SOURCE.startswith("https://") or CAMERA_SOURCE.startswith("rtsp://")
+    )
 
-    if not cap.isOpened():
-        print("[ERROR] Could not open webcam. If you don't have a webcam or it's in use, check CAMERA_INDEX.")
-        return
+    cap = None
+    reader = None
+
+    if is_network_stream:
+        print(f"\nConnecting to network camera stream: {CAMERA_SOURCE} ...")
+        reader = LatestFrameReader(CAMERA_SOURCE)
+        reader.start()
+        print("Waiting for first camera frame (timeout 8s)...")
+        first_frame = None
+        for i in range(80):
+            first_frame = reader.read()
+            if first_frame is not None:
+                break
+            time.sleep(0.1)
+
+        if first_frame is None:
+            print(f"[ERROR] Could not receive video stream from {CAMERA_SOURCE}")
+            print("[INFO] Please verify:")
+            print("  1. ESP32-CAM is powered on and connected to your Wi-Fi.")
+            print("  2. Your computer is on the same Wi-Fi / network subnet as the ESP32-CAM.")
+            print(f"  3. Open {CAMERA_SOURCE} in a web browser to verify the stream.")
+            reader.stop()
+            return
+        print("[SUCCESS] Video stream connected!")
+    else:
+        print(f"\nOpening local webcam index: {CAMERA_SOURCE} ...")
+        cap = cv2.VideoCapture(int(CAMERA_SOURCE))
+        if not cap.isOpened():
+            print(f"[ERROR] Could not open webcam index {CAMERA_SOURCE}.")
+            print("[INFO] Check CAMERA_INDEX in .env or provide a stream URL like: python test_webcam_tracking.py http://10.220.217.17:81/stream")
+            return
+        print("[SUCCESS] Local webcam opened!")
 
     print("\n-----------------------------------------------------------")
     print("TEST MODE ACTIVE (Hardware / Serial is SIMULATED)")
-    print("- Shows live webcam detection with bounding box & confidence")
+    print(f"Camera Source: {CAMERA_SOURCE}")
+    print("- Shows live detection with bounding box & confidence")
     print("- Shows simulated servo movement commands on screen & terminal")
     print("Controls:")
     print("  'q' - Quit test")
@@ -150,11 +325,17 @@ def main():
     last_status_time = 0
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("[WARN] Failed to read frame from webcam.")
-            time.sleep(0.05)
-            continue
+        if is_network_stream:
+            frame = reader.read()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+        else:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                print("[WARN] Failed to read frame from webcam.")
+                time.sleep(0.05)
+                continue
 
         frame = cv2.resize(frame, (FRAME_W, FRAME_H))
         h, w, _ = frame.shape
@@ -291,7 +472,10 @@ def main():
             smooth_x, smooth_y = None, None
             last_pan_cmd, last_tilt_cmd = 0, 0
 
-    cap.release()
+    if reader is not None:
+        reader.stop()
+    if cap is not None:
+        cap.release()
     cv2.destroyAllWindows()
     print("Test finished.")
 

@@ -4,6 +4,9 @@ import serial
 import time
 import threading
 import math
+import socket
+import urllib.request
+import numpy as np
 from pathlib import Path
 from dotenv import load_dotenv
 from ultralytics import YOLO
@@ -15,7 +18,16 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 # SETTINGS
 
 # Path to the trained YOLO model
-MODEL_PATH = os.getenv("MODEL_PATH", "../models/best.pt")
+_raw_model_path = os.getenv("MODEL_PATH", "../models/bestmain.pt")
+_model_path_obj = Path(_raw_model_path)
+if not _model_path_obj.is_absolute() and not _model_path_obj.exists():
+    if (Path(__file__).resolve().parent / _raw_model_path).exists():
+        _model_path_obj = Path(__file__).resolve().parent / _raw_model_path
+    elif (Path(__file__).resolve().parent.parent / _raw_model_path).exists():
+        _model_path_obj = Path(__file__).resolve().parent.parent / _raw_model_path
+    elif (Path(__file__).resolve().parent.parent / "models" / Path(_raw_model_path).name).exists():
+        _model_path_obj = Path(__file__).resolve().parent.parent / "models" / Path(_raw_model_path).name
+MODEL_PATH = str(_model_path_obj)
 
 # Example on macOS: "/dev/cu.usbserial-XXXX"
 # Example on Windows: "COM3"
@@ -33,7 +45,8 @@ TILT_SIGN = int(os.getenv("TILT_SIGN", "-1"))
 
 # Recognition settings
 IMG_SIZE = 320
-CONFIDENCE = 0.35
+CONFIDENCE = float(os.getenv("CONFIDENCE", "0.35"))
+TARGET_CLASS = os.getenv("TARGET_CLASS", "person")
 
 FRAME_W = 320
 FRAME_H = 240
@@ -109,7 +122,27 @@ center_hold_until = 0.0
 class LatestFrameReader:
     def __init__(self, url):
         self.url = url
-        self.cap = None
+        self.host = None
+        self.port = 81
+        self.path = "/stream"
+
+        if "://" in url:
+            netloc = url.split("://", 1)[1]
+            if "/" in netloc:
+                host_port, self.path = netloc.split("/", 1)
+                self.path = "/" + self.path
+            else:
+                host_port = netloc
+            if ":" in host_port:
+                self.host, port_str = host_port.split(":", 1)
+                self.port = int(port_str)
+            else:
+                self.host = host_port
+                self.port = 80
+        else:
+            self.host = url
+
+        self.capture_url = f"http://{self.host}:80/capture"
         self.frame = None
         self.lock = threading.Lock()
         self.running = False
@@ -120,29 +153,50 @@ class LatestFrameReader:
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
-    def _open(self):
-        if self.cap is not None:
-            self.cap.release()
+    def _stream_socket(self):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3.0)
+        s.connect((self.host, self.port))
+        req = f"GET {self.path} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\nUser-Agent: Mozilla/5.0\r\nAccept: */*\r\nConnection: close\r\n\r\n"
+        s.sendall(req.encode())
 
-        self.cap = cv2.VideoCapture(self.url)
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        buffer = b""
+        while self.running:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buffer += chunk
+            a = buffer.find(b"\xff\xd8")
+            b = buffer.find(b"\xff\xd9")
+            if a != -1 and b != -1:
+                if b > a:
+                    jpg = buffer[a:b+2]
+                    buffer = buffer[b+2:]
+                    frame = cv2.imdecode(np.frombuffer(jpg, dtype=np.uint8), cv2.IMREAD_COLOR)
+                    if frame is not None:
+                        with self.lock:
+                            self.frame = frame
+                else:
+                    buffer = buffer[a:]
+        s.close()
 
     def _loop(self):
-        self._open()
-
         while self.running:
-            if self.cap is None or not self.cap.isOpened():
-                self._open()
-                time.sleep(0.05)
-                continue
-
-            ret, frame = self.cap.read()
-
-            if ret and frame is not None:
-                with self.lock:
-                    self.frame = frame
-
-            time.sleep(0.001)
+            try:
+                self._stream_socket()
+            except Exception:
+                # Fallback to /capture endpoint if streaming port is busy
+                try:
+                    req = urllib.request.Request(self.capture_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=1.5) as resp:
+                        arr = np.frombuffer(resp.read(), dtype=np.uint8)
+                        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            with self.lock:
+                                self.frame = frame
+                except Exception:
+                    time.sleep(0.05)
+            time.sleep(0.005)
 
     def read(self):
         with self.lock:
@@ -152,12 +206,8 @@ class LatestFrameReader:
 
     def stop(self):
         self.running = False
-
         if self.thread is not None:
             self.thread.join(timeout=1.0)
-
-        if self.cap is not None:
-            self.cap.release()
 
 # FUNCTIONS
 
@@ -267,8 +317,20 @@ def reset_tracking_state():
 print("Loading YOLO model...")
 model = YOLO(MODEL_PATH)
 
-print("Opening serial port...")
-ser = serial.Serial(SERIAL_PORT, 115200, timeout=1)
+print(f"Opening serial port ({SERIAL_PORT})...")
+try:
+    ser = serial.Serial(SERIAL_PORT, 115200, timeout=1)
+except Exception as e:
+    import serial.tools.list_ports as lp
+    available_ports = [p.device for p in lp.comports()]
+    print(f"\n[ERROR] Failed to open serial port '{SERIAL_PORT}': {e}")
+    if available_ports:
+        print(f"[INFO] Available COM ports detected: {', '.join(available_ports)}")
+        print(f"[INFO] Update SERIAL_PORT in your .env file to one of the above.")
+    else:
+        print("[INFO] No COM ports detected. Please ensure your ESP32 controller is plugged in via USB and drivers (CH340 / CP210x) are installed.")
+        print("[INFO] If you want to test tracking with your webcam without hardware, run: python test_webcam_tracking.py\n")
+    exit(1)
 time.sleep(2)
 
 ser.reset_input_buffer()
@@ -322,7 +384,6 @@ while True:
         frame,
         imgsz=IMG_SIZE,
         conf=CONFIDENCE,
-        max_det=1,
         verbose=False
     )
 
@@ -331,16 +392,32 @@ while True:
     pan_delta = 0
     tilt_delta = 0
     status = "NO TARGET"
+    cls_name = ""
 
-    if (
-        len(results) > 0
-        and results[0].boxes is not None
-        and len(results[0].boxes) > 0
-    ):
-        box = results[0].boxes[0]
+    best_box = None
+    target_list = [c.strip().lower() for c in TARGET_CLASS.split(",")] if TARGET_CLASS else None
+    allow_any = target_list is not None and ("any" in target_list or "all" in target_list)
+    specific_targets = [c for c in target_list if c not in ("any", "all")] if target_list else []
 
-        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-        conf = float(box.conf[0].cpu().numpy())
+    if results and len(results[0].boxes) > 0:
+        matching_boxes = []
+        for b in results[0].boxes:
+            cid = int(b.cls[0])
+            cname = model.names.get(cid, str(cid)).lower()
+            if specific_targets:
+                if cname in specific_targets:
+                    matching_boxes.append(b)
+            elif allow_any or not specific_targets:
+                matching_boxes.append(b)
+
+        if matching_boxes:
+            best_box = max(matching_boxes, key=lambda b: float(b.conf[0]))
+
+    if best_box is not None:
+        x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
+        conf = float(best_box.conf[0].cpu().numpy())
+        cls_id = int(best_box.cls[0].cpu().numpy())
+        cls_name = model.names.get(cls_id, str(cls_id))
 
         x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
 
@@ -457,7 +534,7 @@ while True:
 
         cv2.putText(
             frame,
-            f"{status} {conf:.2f} D=({pan_delta},{tilt_delta})",
+            f"[{cls_name}] {status} {conf:.2f} D=({pan_delta},{tilt_delta})",
             (10, 25),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.42,

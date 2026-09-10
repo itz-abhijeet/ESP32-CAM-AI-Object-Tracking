@@ -77,8 +77,8 @@ MODEL_PATH = _model_path_obj
 # Camera feed & Recognition resolution
 FRAME_W = int(os.getenv("FRAME_W", "640"))
 FRAME_H = int(os.getenv("FRAME_H", "480"))
-IMG_SIZE = int(os.getenv("IMG_SIZE", "320"))
-CONFIDENCE = float(os.getenv("CONFIDENCE", "0.35"))
+IMG_SIZE = int(os.getenv("IMG_SIZE", "416"))   # Larger input = better small/fast object detection
+CONFIDENCE = float(os.getenv("CONFIDENCE", "0.25"))  # Lower = catches blurry/partial fast-moving drones
 
 # Deadband & Far zones for tracking calculation
 HOLD_X = 35
@@ -96,18 +96,18 @@ KP_TILT_FAR = 0.18
 MAX_DELTA_TILT = 14
 MIN_DELTA_TILT = 3
 
-ALPHA_X = 0.63
-ALPHA_Y = 0.60
-CMD_ALPHA_PAN = 0.70
-CMD_ALPHA_TILT = 0.66
-MAX_CMD_CHANGE_PAN = 6
-MAX_CMD_CHANGE_TILT = 5
-OSC_IGNORE_PAN = 5
-OSC_IGNORE_TILT = 4
+ALPHA_X = 0.82           # Higher = snaps faster to new position (was 0.63)
+ALPHA_Y = 0.80           # Higher = snaps faster to new position (was 0.60)
+CMD_ALPHA_PAN = 0.80     # Faster servo command response (was 0.70)
+CMD_ALPHA_TILT = 0.78    # Faster servo command response (was 0.66)
+MAX_CMD_CHANGE_PAN = 10  # Allow bigger per-frame servo steps for fast targets (was 6)
+MAX_CMD_CHANGE_TILT = 8  # Allow bigger per-frame servo steps for fast targets (was 5)
+OSC_IGNORE_PAN = 3       # Less oscillation suppression for fast targets (was 5)
+OSC_IGNORE_TILT = 3      # Less oscillation suppression for fast targets (was 4)
 
-MIN_STABLE_DETECTIONS = 2
-MAX_CENTER_JUMP = 120
-HIGH_CONF_ALLOW_JUMP = 0.70
+MIN_STABLE_DETECTIONS = 1   # Lock on in 1 frame — don't waste frames on fast re-entries (was 2)
+MAX_CENTER_JUMP = 220       # Allow large position jumps for fast drones (was 120)
+HIGH_CONF_ALLOW_JUMP = 0.40 # Allow jumps at lower confidence — motion blur drops conf (was 0.70)
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -328,6 +328,13 @@ def main():
     stable_count = 0
     last_status_time = 0
 
+    # Velocity predictor — used to coast through brief missed frames
+    vel_x = 0.0          # pixels/frame velocity
+    vel_y = 0.0
+    lost_frames = 0      # consecutive frames with no detection
+    MAX_LOST_FRAMES = 5  # coast for up to 5 frames before giving up
+    VEL_ALPHA = 0.55     # smoothing factor for velocity estimate (0=ignore, 1=raw)
+
     while True:
         if is_network_stream:
             frame = reader.read()
@@ -409,9 +416,18 @@ def main():
                 stable_count += 1
                 if smooth_x is None:
                     smooth_x, smooth_y = raw_x, raw_y
+                    vel_x, vel_y = 0.0, 0.0
                 else:
+                    # Update velocity estimate before moving smooth position
+                    new_vel_x = float(raw_x - smooth_x)
+                    new_vel_y = float(raw_y - smooth_y)
+                    vel_x = VEL_ALPHA * new_vel_x + (1 - VEL_ALPHA) * vel_x
+                    vel_y = VEL_ALPHA * new_vel_y + (1 - VEL_ALPHA) * vel_y
+
                     smooth_x = int(ALPHA_X * raw_x + (1 - ALPHA_X) * smooth_x)
                     smooth_y = int(ALPHA_Y * raw_y + (1 - ALPHA_Y) * smooth_y)
+
+                lost_frames = 0  # reset coast counter on successful detection
 
                 error_x = smooth_x - center_x
                 error_y = smooth_y - center_y
@@ -442,10 +458,32 @@ def main():
             else:
                 stable_count = 0
         else:
-            smooth_x, smooth_y = None, None
-            last_pan_cmd, last_tilt_cmd = 0, 0
-            stable_count = 0
-            status = "NO TARGET"
+            # ── No detection this frame ──────────────────────────────────────
+            if smooth_x is not None and lost_frames < MAX_LOST_FRAMES:
+                # COAST: extrapolate position using last known velocity
+                lost_frames += 1
+                smooth_x = int(smooth_x + vel_x)
+                smooth_y = int(smooth_y + vel_y)
+                # Clamp to frame bounds
+                smooth_x = max(0, min(w - 1, smooth_x))
+                smooth_y = max(0, min(h - 1, smooth_y))
+
+                # Keep issuing last servo command while coasting
+                status = f"COASTING ({lost_frames}/{MAX_LOST_FRAMES})"
+                simulated_command = f"D,{last_pan_cmd},{last_tilt_cmd}"
+
+                # Draw coasting indicator (dashed orange circle)
+                cv2.circle(frame, (smooth_x, smooth_y), 10, (0, 140, 255), 2)
+                cv2.putText(frame, f"COASTING", (smooth_x + 12, smooth_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 140, 255), 1)
+            else:
+                # Lost for too long — full reset
+                smooth_x, smooth_y = None, None
+                vel_x, vel_y = 0.0, 0.0
+                lost_frames = 0
+                last_pan_cmd, last_tilt_cmd = 0, 0
+                stable_count = 0
+                status = "NO TARGET"
 
         # Center frame crosshair & hold zone rectangle
         cv2.drawMarker(frame, (center_x, center_y), (255, 255, 255), cv2.MARKER_CROSS, 16, 1)

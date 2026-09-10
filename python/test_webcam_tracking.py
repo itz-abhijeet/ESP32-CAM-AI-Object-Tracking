@@ -300,11 +300,15 @@ def main():
         print("[SUCCESS] Video stream connected!")
     else:
         print(f"\nOpening local webcam index: {CAMERA_SOURCE} ...")
-        cap = cv2.VideoCapture(int(CAMERA_SOURCE))
+        # Use DirectShow backend on Windows to avoid MSMF hang
+        backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+        cap = cv2.VideoCapture(int(CAMERA_SOURCE), backend)
         if not cap.isOpened():
             print(f"[ERROR] Could not open webcam index {CAMERA_SOURCE}.")
             print("[INFO] Check CAMERA_INDEX in .env or provide a stream URL like: python test_webcam_tracking.py http://10.220.217.17:81/stream")
             return
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
         print("[SUCCESS] Local webcam opened!")
 
     print("\n-----------------------------------------------------------")

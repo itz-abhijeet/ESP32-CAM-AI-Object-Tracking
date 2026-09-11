@@ -11,6 +11,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 from ultralytics import YOLO
 
+# Optional: push live data to AstraNex UI server (ui_server.py)
+try:
+    from tracking_bridge import push_state as _push_state, push_frame as _push_frame
+    UI_ENABLED = True
+except ImportError:
+    UI_ENABLED = False
+    def _push_state(*a, **kw): pass
+    def _push_frame(*a, **kw): pass
+
 # Load .env from python directory or project root
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
@@ -116,6 +125,9 @@ last_sent_move = False
 stable_detection_count = 0
 
 center_hold_until = 0.0
+
+_ui_fps = 0.0
+_ui_last_t = time.time()
 
 # LOW LATENCY CAMERA READER
 
@@ -614,6 +626,33 @@ while True:
     else:
         # Prevent spinning in 100% CPU loop when headless
         time.sleep(0.005)
+
+    # ── Push to AstraNex UI (non-blocking) ──────────────────────────────
+    if UI_ENABLED:
+        _now_u = time.time()
+        _dt_u = _now_u - _ui_last_t
+        _ui_last_t = _now_u
+        if _dt_u > 0:
+            _ui_fps = 0.9 * _ui_fps + 0.1 * (1.0 / _dt_u)
+        _bbox_u = (x1, y1, x2, y2) if best_box is not None else None
+        _push_state(
+            status=status,
+            cls_name=cls_name,
+            confidence=float(best_box.conf[0].cpu().numpy()) if best_box is not None else 0.0,
+            pan_delta=pan_delta,
+            tilt_delta=tilt_delta,
+            error_x=int(smooth_x - frame_center_x) if smooth_x is not None else 0,
+            error_y=int(smooth_y - frame_center_y) if smooth_y is not None else 0,
+            smooth_x=smooth_x,
+            smooth_y=smooth_y,
+            bbox=_bbox_u,
+            fps=round(_ui_fps, 1),
+            frame_w=FRAME_W,
+            frame_h=FRAME_H,
+        )
+        _ok_u, _jpg_u = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if _ok_u:
+            _push_frame(bytes(_jpg_u))
 
 
 try:

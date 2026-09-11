@@ -8,6 +8,15 @@ from ultralytics import YOLO
 import sys
 import threading
 
+# Optional: push live data to AstraNex UI server (ui_server.py)
+try:
+    from tracking_bridge import push_state, push_frame as _push_frame
+    UI_ENABLED = True
+except ImportError:
+    UI_ENABLED = False
+    def push_state(*a, **kw): pass
+    def _push_frame(*a, **kw): pass
+
 # Load .env from python directory or project root
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env")
 load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
@@ -327,6 +336,8 @@ def main():
     last_tilt_cmd = 0
     stable_count = 0
     last_status_time = 0
+    _loop_fps = 0.0
+    _loop_last_t = time.time()
 
     # Velocity predictor — used to coast through brief missed frames
     vel_x = 0.0          # pixels/frame velocity
@@ -495,6 +506,36 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255) if status == "TRACK" else (200, 200, 200), 2)
         cv2.putText(frame, f"Simulated Servo Cmd: {simulated_command}", (15, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0) if "D," in simulated_command and simulated_command != "D,0,0" else (180, 180, 180), 2)
+
+        # ── Push to AstraNex UI (non-blocking) ──────────────────────────────
+        _now_t = time.time()
+        _dt = _now_t - _loop_last_t
+        _loop_last_t = _now_t
+        if _dt > 0:
+            _loop_fps = 0.9 * _loop_fps + 0.1 * (1.0 / _dt)
+        if UI_ENABLED:
+            _bbox_val = (x1, y1, x2, y2) if best_box is not None else None
+            _cls_val  = cls_name if best_box is not None else ''
+            _conf_val = conf if best_box is not None else 0.0
+            push_state(
+                status=status,
+                cls_name=_cls_val,
+                confidence=_conf_val,
+                pan_delta=pan_delta,
+                tilt_delta=tilt_delta,
+                error_x=int(smooth_x - center_x) if smooth_x is not None else 0,
+                error_y=int(smooth_y - center_y) if smooth_y is not None else 0,
+                smooth_x=smooth_x,
+                smooth_y=smooth_y,
+                bbox=_bbox_val,
+                fps=round(_loop_fps, 1),
+                frame_w=FRAME_W,
+                frame_h=FRAME_H,
+            )
+            # Encode frame as JPEG and push
+            _ok, _jpg = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if _ok:
+                _push_frame(bytes(_jpg))
 
         cv2.imshow("ESP32-CAM AI Tracker [TEST MODE - WEBCAM]", frame)
 

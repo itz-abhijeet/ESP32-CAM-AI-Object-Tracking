@@ -3,3 +3,4 @@ pyserial
 ultralytics
 numpy
 python-dotenv
+websockets

@@ -1,0 +1,1155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AstraNex — AI Object Tracking System</title>
+  <meta name="description" content="AstraNex real-time AI object tracking dashboard — ESP32-CAM + YOLOv8 live monitoring." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+
+  <style>
+    /* ── Design tokens ────────────────────────────────────────────────────── */
+    :root {
+      --bg:          #08090f;
+      --bg2:         #0d0f1a;
+      --bg3:         #13162a;
+      --border:      rgba(80,120,255,0.18);
+      --glow-blue:   #3b82f6;
+      --glow-cyan:   #06b6d4;
+      --glow-green:  #22c55e;
+      --glow-orange: #f97316;
+      --glow-red:    #ef4444;
+      --glow-yellow: #eab308;
+      --text:        #e2e8f0;
+      --muted:       #64748b;
+      --card-bg:     rgba(13,15,26,0.85);
+      --glass:       rgba(255,255,255,0.04);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Outfit', sans-serif;
+      overflow-x: hidden;
+    }
+
+    /* Animated star-field background */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% -20%, rgba(59,130,246,0.12) 0%, transparent 70%),
+        radial-gradient(ellipse 60% 40% at 90% 100%, rgba(6,182,212,0.08) 0%, transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Layout ──────────────────────────────────────────────────────────── */
+    .layout {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      grid-template-columns: 320px 1fr 300px;
+      grid-template-areas:
+        "header header header"
+        "left   main   right"
+        "footer footer footer";
+      min-height: 100vh;
+      gap: 0;
+    }
+
+    /* ── Header ──────────────────────────────────────────────────────────── */
+    header {
+      grid-area: header;
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      padding: 14px 28px;
+      background: rgba(8,9,15,0.92);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .logo-wrap {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .logo-img {
+      height: 52px;
+      width: auto;
+      filter: drop-shadow(0 0 10px rgba(59,130,246,0.6));
+      animation: logo-pulse 3s ease-in-out infinite;
+    }
+
+    @keyframes logo-pulse {
+      0%,100% { filter: drop-shadow(0 0 10px rgba(59,130,246,0.6)); }
+      50%      { filter: drop-shadow(0 0 22px rgba(6,182,212,0.9)); }
+    }
+
+    .brand-text h1 {
+      font-size: 1.55rem;
+      font-weight: 800;
+      background: linear-gradient(90deg, #3b82f6 0%, #06b6d4 60%, #a78bfa 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+
+    .brand-text p {
+      font-size: 0.72rem;
+      font-weight: 400;
+      color: var(--muted);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-top: 2px;
+    }
+
+    .header-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    /* WS connection pill */
+    .conn-pill {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 14px;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      border: 1px solid var(--border);
+      background: var(--glass);
+      transition: all 0.3s;
+    }
+    .conn-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--muted);
+      transition: all 0.3s;
+    }
+    .conn-pill.connected   { border-color: rgba(34,197,94,0.4); color: var(--glow-green); }
+    .conn-pill.connected .conn-dot { background: var(--glow-green); box-shadow: 0 0 8px var(--glow-green); animation: blink 1.5s infinite; }
+    .conn-pill.connecting  { border-color: rgba(234,179,8,0.4);  color: var(--glow-yellow); }
+    .conn-pill.connecting .conn-dot { background: var(--glow-yellow); animation: blink 0.6s infinite; }
+    .conn-pill.disconnected{ border-color: rgba(239,68,68,0.4);  color: var(--glow-red); }
+    .conn-pill.disconnected .conn-dot { background: var(--glow-red); }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+    .clock {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    /* ── Panels ──────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      backdrop-filter: blur(10px);
+      transition: border-color 0.3s, box-shadow 0.3s;
+    }
+    .card:hover { border-color: rgba(59,130,246,0.35); }
+
+    .panel-title {
+      font-size: 0.68rem;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .panel-title span.dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--glow-blue);
+      box-shadow: 0 0 6px var(--glow-blue);
+    }
+
+    /* ── Left sidebar ────────────────────────────────────────────────────── */
+    .sidebar-left {
+      grid-area: left;
+      padding: 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+    }
+
+    /* Status Badge */
+    .status-card {
+      padding: 20px;
+    }
+    .status-value {
+      font-size: 1.8rem;
+      font-weight: 800;
+      letter-spacing: 0.04em;
+      font-family: 'JetBrains Mono', monospace;
+      text-align: center;
+      padding: 16px 12px;
+      border-radius: 12px;
+      border: 2px solid transparent;
+      transition: all 0.35s;
+      position: relative;
+      overflow: hidden;
+    }
+    .status-value::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: currentColor;
+      opacity: 0.06;
+      border-radius: 10px;
+    }
+    .status-TRACK      { color: var(--glow-cyan);   border-color: rgba(6,182,212,0.45);   box-shadow: 0 0 24px rgba(6,182,212,0.2);  animation: track-pulse 1s infinite; }
+    .status-HOLD       { color: var(--glow-green);  border-color: rgba(34,197,94,0.4);    box-shadow: 0 0 18px rgba(34,197,94,0.15); }
+    .status-LOCKING    { color: var(--glow-yellow); border-color: rgba(234,179,8,0.4);    animation: blink 0.7s infinite; }
+    .status-NO_TARGET  { color: var(--glow-red);    border-color: rgba(239,68,68,0.4);    animation: no-target 2s ease-in-out infinite; }
+    .status-COASTING   { color: var(--glow-orange); border-color: rgba(249,115,22,0.4);   animation: blink 1.2s infinite; }
+    .status-JUMP_IGNORED { color: var(--muted);     border-color: rgba(100,116,139,0.4); }
+    .status-IDLE       { color: var(--muted);       border-color: rgba(100,116,139,0.3); }
+
+    @keyframes track-pulse {
+      0%,100% { box-shadow: 0 0 24px rgba(6,182,212,0.2); }
+      50%      { box-shadow: 0 0 40px rgba(6,182,212,0.45); }
+    }
+    @keyframes no-target {
+      0%,100% { box-shadow: 0 0 18px rgba(239,68,68,0.15); }
+      50%      { box-shadow: 0 0 36px rgba(239,68,68,0.4); }
+    }
+
+    /* Metric Cards Grid */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .metric-card {
+      padding: 14px 14px 12px;
+      border-radius: 12px;
+      background: var(--bg3);
+      border: 1px solid var(--border);
+    }
+    .metric-label {
+      font-size: 0.62rem;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .metric-value {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 1.35rem;
+      font-weight: 600;
+      color: var(--text);
+      transition: color 0.3s;
+    }
+    .metric-value.positive { color: var(--glow-cyan); }
+    .metric-value.negative { color: var(--glow-orange); }
+    .metric-value.good     { color: var(--glow-green); }
+    .metric-value.warn     { color: var(--glow-yellow); }
+    .metric-value.danger   { color: var(--glow-red); }
+
+    /* Confidence bar */
+    .conf-bar-wrap {
+      margin-top: 4px;
+      height: 4px;
+      background: rgba(255,255,255,0.06);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .conf-bar {
+      height: 100%;
+      border-radius: 4px;
+      background: linear-gradient(90deg, var(--glow-blue), var(--glow-cyan));
+      transition: width 0.4s ease, background 0.4s;
+    }
+
+    /* Target info */
+    .target-card { padding: 16px; }
+    .target-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      font-size: 0.78rem;
+    }
+    .target-row:last-child { border-bottom: none; }
+    .target-row .key { color: var(--muted); }
+    .target-row .val {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    /* ── Main center ─────────────────────────────────────────────────────── */
+    .main-center {
+      grid-area: main;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      overflow-y: auto;
+    }
+
+    /* Camera feed */
+    .feed-card {
+      flex: 1;
+      padding: 16px;
+      min-height: 360px;
+      position: relative;
+    }
+    .feed-container {
+      position: relative;
+      width: 100%;
+      height: calc(100% - 36px);
+      min-height: 300px;
+      background: #000;
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #video-feed {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+    }
+    .feed-overlay-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+    .no-feed-msg {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .no-feed-msg svg { width: 48px; height: 48px; opacity: 0.4; }
+    .feed-corner-tl, .feed-corner-tr, .feed-corner-bl, .feed-corner-br {
+      position: absolute;
+      width: 20px; height: 20px;
+      border-color: var(--glow-cyan);
+      border-style: solid;
+      opacity: 0.7;
+    }
+    .feed-corner-tl { top: 8px; left: 8px;  border-width: 2px 0 0 2px; }
+    .feed-corner-tr { top: 8px; right: 8px; border-width: 2px 2px 0 0; }
+    .feed-corner-bl { bottom: 8px; left: 8px;  border-width: 0 0 2px 2px; }
+    .feed-corner-br { bottom: 8px; right: 8px; border-width: 0 2px 2px 0; }
+
+    /* Feed badges */
+    .feed-badge {
+      position: absolute;
+      top: 14px;
+      right: 14px;
+      display: flex;
+      gap: 6px;
+    }
+    .badge {
+      padding: 3px 9px;
+      border-radius: 999px;
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+    .badge-live  { background: rgba(239,68,68,0.2);  color: var(--glow-red);   border: 1px solid rgba(239,68,68,0.4);  animation: blink 1.2s infinite; }
+    .badge-fps   { background: rgba(6,182,212,0.15); color: var(--glow-cyan);  border: 1px solid rgba(6,182,212,0.3); }
+
+    /* ── Right sidebar ───────────────────────────────────────────────────── */
+    .sidebar-right {
+      grid-area: right;
+      padding: 20px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      border-left: 1px solid var(--border);
+      overflow-y: auto;
+    }
+
+    /* Joystick / servo visualizer */
+    .joystick-card { padding: 16px; }
+    .joystick-wrap {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1;
+      max-width: 220px;
+      margin: 0 auto;
+    }
+    #joystick-canvas {
+      width: 100%;
+      height: 100%;
+      border-radius: 10px;
+    }
+
+    /* Error vector chart (simple bars) */
+    .error-card { padding: 16px; }
+    .error-bar-container {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .error-axis {
+      font-size: 0.68rem;
+      font-weight: 600;
+      color: var(--muted);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      margin-bottom: 3px;
+    }
+    .error-track {
+      height: 12px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 6px;
+      position: relative;
+      overflow: hidden;
+    }
+    .error-fill {
+      position: absolute;
+      top: 0;
+      height: 100%;
+      border-radius: 6px;
+      transition: width 0.3s, left 0.3s, background 0.3s;
+    }
+    .error-center-line {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: rgba(255,255,255,0.15);
+      transform: translateX(-50%);
+    }
+
+    /* History log */
+    .log-card { padding: 16px; flex: 1; }
+    .log-list {
+      height: 180px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 4px;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border) transparent;
+    }
+    .log-entry {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.62rem;
+      color: var(--muted);
+      padding: 3px 6px;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.02);
+      transition: color 0.2s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .log-entry.track   { color: var(--glow-cyan); }
+    .log-entry.hold    { color: var(--glow-green); }
+    .log-entry.locking { color: var(--glow-yellow); }
+    .log-entry.no_target { color: var(--glow-red); }
+    .log-entry.coasting  { color: var(--glow-orange); }
+
+    /* ── Footer ──────────────────────────────────────────────────────────── */
+    footer {
+      grid-area: footer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 28px;
+      background: rgba(8,9,15,0.92);
+      border-top: 1px solid var(--border);
+      font-size: 0.68rem;
+      color: var(--muted);
+    }
+    footer strong { color: var(--glow-blue); }
+
+    /* Scrollbar styling */
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* ── Responsive ──────────────────────────────────────────────────────── */
+    @media (max-width: 1100px) {
+      .layout {
+        grid-template-columns: 280px 1fr 260px;
+      }
+    }
+    @media (max-width: 860px) {
+      .layout {
+        grid-template-columns: 1fr;
+        grid-template-areas:
+          "header"
+          "main"
+          "left"
+          "right"
+          "footer";
+      }
+      .sidebar-left, .sidebar-right {
+        border: none;
+        border-top: 1px solid var(--border);
+      }
+    }
+  </style>
+</head>
+<body>
+
+<div class="layout">
+
+  <!-- ═══ HEADER ══════════════════════════════════════════════════════════ -->
+  <header>
+    <div class="logo-wrap">
+      <img id="logo" class="logo-img" src="http://localhost:8766/logo.png" alt="AstraNex Logo"
+           onerror="this.src='AstraNex_Logo.png'" />
+      <div class="brand-text">
+        <h1>AstraNex</h1>
+        <p>AI Object Tracking System</p>
+      </div>
+    </div>
+
+    <div class="header-right">
+      <div class="conn-pill connecting" id="conn-pill">
+        <div class="conn-dot" id="conn-dot"></div>
+        <span id="conn-label">Connecting…</span>
+      </div>
+      <span class="clock" id="clock"></span>
+    </div>
+  </header>
+
+  <!-- ═══ LEFT SIDEBAR ════════════════════════════════════════════════════ -->
+  <aside class="sidebar-left">
+
+    <!-- Status -->
+    <div class="card status-card">
+      <div class="panel-title"><span class="dot"></span> Tracking Status</div>
+      <div class="status-value status-IDLE" id="status-badge">IDLE</div>
+    </div>
+
+    <!-- Metrics Grid -->
+    <div class="card" style="padding:16px;">
+      <div class="panel-title"><span class="dot"></span> Live Metrics</div>
+      <div class="metrics-grid">
+
+        <div class="metric-card">
+          <div class="metric-label">Confidence</div>
+          <div class="metric-value" id="m-conf">—</div>
+          <div class="conf-bar-wrap"><div class="conf-bar" id="conf-bar" style="width:0%"></div></div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">FPS</div>
+          <div class="metric-value" id="m-fps">—</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Pan Δ</div>
+          <div class="metric-value" id="m-pan">0</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Tilt Δ</div>
+          <div class="metric-value" id="m-tilt">0</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Error X</div>
+          <div class="metric-value" id="m-errx">0</div>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-label">Error Y</div>
+          <div class="metric-value" id="m-erry">0</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Target Info -->
+    <div class="card target-card">
+      <div class="panel-title"><span class="dot"></span> Target Info</div>
+      <div class="target-row">
+        <span class="key">Class</span>
+        <span class="val" id="t-class">—</span>
+      </div>
+      <div class="target-row">
+        <span class="key">BBox X1,Y1</span>
+        <span class="val" id="t-bbox1">—</span>
+      </div>
+      <div class="target-row">
+        <span class="key">BBox X2,Y2</span>
+        <span class="val" id="t-bbox2">—</span>
+      </div>
+      <div class="target-row">
+        <span class="key">Smooth X,Y</span>
+        <span class="val" id="t-smooth">—</span>
+      </div>
+      <div class="target-row">
+        <span class="key">Frame Size</span>
+        <span class="val" id="t-frame">—</span>
+      </div>
+    </div>
+
+  </aside>
+
+  <!-- ═══ MAIN CENTER ══════════════════════════════════════════════════════ -->
+  <main class="main-center">
+
+    <div class="card feed-card">
+      <div class="panel-title"><span class="dot"></span> Live Camera Feed</div>
+
+      <div class="feed-container" id="feed-container">
+        <!-- corners -->
+        <div class="feed-corner-tl"></div>
+        <div class="feed-corner-tr"></div>
+        <div class="feed-corner-bl"></div>
+        <div class="feed-corner-br"></div>
+
+        <!-- MJPEG stream (primary) -->
+        <img id="video-feed"
+             src="http://localhost:8766/video"
+             alt="Camera Feed"
+             style="display:none;"
+             onload="onFeedLoaded()"
+             onerror="onFeedError()" />
+
+        <!-- Canvas for WebSocket binary frames (fallback) -->
+        <canvas id="frame-canvas" style="display:none; width:100%; height:100%; object-fit:contain;"></canvas>
+
+        <!-- Canvas overlay for bounding boxes & crosshair -->
+        <canvas class="feed-overlay-canvas" id="overlay-canvas"></canvas>
+
+        <!-- Placeholder -->
+        <div class="no-feed-msg" id="no-feed-msg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="4" width="20" height="16" rx="2"/>
+            <circle cx="12" cy="12" r="3.5"/>
+            <path d="M8.5 4l1.5-2h4l1.5 2"/>
+          </svg>
+          <span>Waiting for camera stream…</span>
+          <span style="font-size:0.7rem;opacity:0.6">Start ui_server.py and your tracker</span>
+        </div>
+
+        <!-- Live / FPS badges -->
+        <div class="feed-badge">
+          <span class="badge badge-live" id="live-badge" style="display:none">● LIVE</span>
+          <span class="badge badge-fps" id="fps-badge" style="display:none">— fps</span>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ═══ RIGHT SIDEBAR ═══════════════════════════════════════════════════ -->
+  <aside class="sidebar-right">
+
+    <!-- Servo Joystick -->
+    <div class="card joystick-card">
+      <div class="panel-title"><span class="dot"></span> Servo Direction</div>
+      <div class="joystick-wrap">
+        <canvas id="joystick-canvas"></canvas>
+      </div>
+    </div>
+
+    <!-- Error Vector Bars -->
+    <div class="card error-card">
+      <div class="panel-title"><span class="dot"></span> Position Error</div>
+      <div class="error-bar-container">
+        <div>
+          <div class="error-axis">Pan / X-axis</div>
+          <div class="error-track" id="error-x-track">
+            <div class="error-center-line"></div>
+            <div class="error-fill" id="error-x-fill" style="width:0%; left:50%; background:var(--glow-cyan)"></div>
+          </div>
+        </div>
+        <div>
+          <div class="error-axis">Tilt / Y-axis</div>
+          <div class="error-track" id="error-y-track">
+            <div class="error-center-line"></div>
+            <div class="error-fill" id="error-y-fill" style="width:0%; left:50%; background:var(--glow-cyan)"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Event Log -->
+    <div class="card log-card">
+      <div class="panel-title"><span class="dot"></span> Event Log</div>
+      <div class="log-list" id="log-list"></div>
+    </div>
+
+  </aside>
+
+  <!-- ═══ FOOTER ══════════════════════════════════════════════════════════ -->
+  <footer>
+    <span>© 2025 <strong>AstraNex</strong> — ESP32-CAM AI Object Tracking</span>
+    <span id="footer-stat">WebSocket: ws://localhost:8765</span>
+  </footer>
+
+</div><!-- .layout -->
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   AstraNex Tracking Dashboard — Frontend Logic
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const WS_URL = 'ws://localhost:8765';
+
+/* ── State ────────────────────────────────────────────────────────────────── */
+let state = {
+  status: 'IDLE',
+  cls_name: '',
+  confidence: 0,
+  pan_delta: 0,
+  tilt_delta: 0,
+  error_x: 0,
+  error_y: 0,
+  smooth_x: null,
+  smooth_y: null,
+  bbox: null,
+  fps: 0,
+  frame_w: 640,
+  frame_h: 480,
+};
+
+let lastFrameTime = 0;
+let fpsEst = 0;
+let logEntries = [];
+let lastLogStatus = '';
+let feedActive = false;
+
+/* ── Clock ────────────────────────────────────────────────────────────────── */
+function updateClock() {
+  const now = new Date();
+  document.getElementById('clock').textContent =
+    now.toLocaleTimeString('en-IN', { hour12: false });
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+/* ── WebSocket ─────────────────────────────────────────────────────────────── */
+let ws = null;
+let wsReconnectTimer = null;
+
+function setConnStatus(s) {
+  const pill = document.getElementById('conn-pill');
+  const label = document.getElementById('conn-label');
+  pill.className = 'conn-pill ' + s;
+  const map = { connected: 'Connected', connecting: 'Connecting…', disconnected: 'Disconnected' };
+  label.textContent = map[s] || s;
+}
+
+function connectWS() {
+  setConnStatus('connecting');
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    setConnStatus('connected');
+    clearTimeout(wsReconnectTimer);
+    addLog('WebSocket connected', 'hold');
+  };
+
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      try {
+        const d = JSON.parse(ev.data);
+        if (d.type === 'state') applyState(d);
+      } catch {}
+    } else if (ev.data instanceof Blob) {
+      // Binary frame via WebSocket
+      ev.data.arrayBuffer().then(buf => renderBinaryFrame(buf));
+    }
+  };
+
+  ws.onclose = () => {
+    setConnStatus('disconnected');
+    addLog('WebSocket disconnected', 'no_target');
+    wsReconnectTimer = setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => {};
+}
+
+connectWS();
+
+/* ── Apply state ───────────────────────────────────────────────────────────── */
+function applyState(d) {
+  state = { ...state, ...d };
+
+  // Status badge
+  const badge = document.getElementById('status-badge');
+  const sanitized = state.status.replace(/\s+/g, '_').replace(/[^A-Z0-9_]/gi, '');
+  badge.className = `status-value status-${sanitized}`;
+  badge.textContent = state.status;
+
+  // Metrics
+  const conf = state.confidence;
+  const confEl = document.getElementById('m-conf');
+  confEl.textContent = conf > 0 ? (conf * 100).toFixed(1) + '%' : '—';
+  confEl.className = 'metric-value ' + (conf > 0.7 ? 'good' : conf > 0.45 ? 'positive' : conf > 0 ? 'warn' : '');
+  document.getElementById('conf-bar').style.width = (conf * 100) + '%';
+  document.getElementById('conf-bar').style.background =
+    conf > 0.7 ? 'linear-gradient(90deg, #22c55e, #4ade80)' :
+    conf > 0.45 ? 'linear-gradient(90deg, #3b82f6, #06b6d4)' :
+    'linear-gradient(90deg, #eab308, #f97316)';
+
+  // FPS
+  const fpsEl = document.getElementById('m-fps');
+  if (state.fps > 0) {
+    fpsEl.textContent = state.fps.toFixed(0);
+    fpsEl.className = 'metric-value ' + (state.fps >= 20 ? 'good' : state.fps >= 10 ? 'warn' : 'danger');
+    document.getElementById('fps-badge').textContent = state.fps.toFixed(0) + ' fps';
+  } else {
+    fpsEl.textContent = '—';
+    fpsEl.className = 'metric-value';
+  }
+
+  // Pan/Tilt
+  const panEl = document.getElementById('m-pan');
+  panEl.textContent = state.pan_delta > 0 ? '+' + state.pan_delta : state.pan_delta;
+  panEl.className = 'metric-value ' + (state.pan_delta > 0 ? 'positive' : state.pan_delta < 0 ? 'negative' : '');
+
+  const tiltEl = document.getElementById('m-tilt');
+  tiltEl.textContent = state.tilt_delta > 0 ? '+' + state.tilt_delta : state.tilt_delta;
+  tiltEl.className = 'metric-value ' + (state.tilt_delta > 0 ? 'positive' : state.tilt_delta < 0 ? 'negative' : '');
+
+  // Error X/Y
+  document.getElementById('m-errx').textContent = state.error_x;
+  document.getElementById('m-erry').textContent = state.error_y;
+
+  // Target info
+  document.getElementById('t-class').textContent = state.cls_name || '—';
+  if (state.bbox) {
+    document.getElementById('t-bbox1').textContent = `${state.bbox[0]}, ${state.bbox[1]}`;
+    document.getElementById('t-bbox2').textContent = `${state.bbox[2]}, ${state.bbox[3]}`;
+  } else {
+    document.getElementById('t-bbox1').textContent = '—';
+    document.getElementById('t-bbox2').textContent = '—';
+  }
+  document.getElementById('t-smooth').textContent =
+    state.smooth_x != null ? `${state.smooth_x}, ${state.smooth_y}` : '—';
+  document.getElementById('t-frame').textContent =
+    state.frame_w ? `${state.frame_w} × ${state.frame_h}` : '—';
+
+  // Error bars
+  updateErrorBar('error-x-fill', state.error_x, state.frame_w / 2);
+  updateErrorBar('error-y-fill', state.error_y, state.frame_h / 2);
+
+  // Joystick
+  drawJoystick(state.pan_delta, state.tilt_delta);
+
+  // Overlay canvas
+  drawOverlay();
+
+  // Log
+  if (state.status !== lastLogStatus) {
+    addLog(`${state.status}  cls:${state.cls_name || 'none'}  conf:${(conf*100).toFixed(0)}%`, state.status.replace(/\s/g,'_').toLowerCase());
+    lastLogStatus = state.status;
+  }
+}
+
+/* ── Error bars ───────────────────────────────────────────────────────────── */
+function updateErrorBar(id, error, halfRange) {
+  const el = document.getElementById(id);
+  if (!halfRange) return;
+  const pct = Math.min(Math.abs(error) / halfRange, 1) * 50;
+  el.style.width = pct + '%';
+  if (error >= 0) {
+    el.style.left = '50%';
+  } else {
+    el.style.left = (50 - pct) + '%';
+  }
+  el.style.background = pct > 35 ? 'var(--glow-orange)' : pct > 15 ? 'var(--glow-cyan)' : 'var(--glow-green)';
+}
+
+/* ── Joystick canvas ─────────────────────────────────────────────────────── */
+const joyCv = document.getElementById('joystick-canvas');
+const joyCtx = joyCv.getContext('2d');
+
+function resizeJoystick() {
+  const size = joyCv.parentElement.clientWidth;
+  joyCv.width = size;
+  joyCv.height = size;
+  drawJoystick(state.pan_delta, state.tilt_delta);
+}
+
+function drawJoystick(pan, tilt) {
+  const w = joyCv.width, h = joyCv.height;
+  const cx = w / 2, cy = h / 2;
+  const R = Math.min(w, h) / 2 - 14;
+  const dotR = R * 0.22;
+  const maxCmd = 20;
+
+  joyCtx.clearRect(0, 0, w, h);
+
+  // Background circle
+  joyCtx.beginPath();
+  joyCtx.arc(cx, cy, R, 0, Math.PI * 2);
+  const grad = joyCtx.createRadialGradient(cx, cy, 0, cx, cy, R);
+  grad.addColorStop(0, 'rgba(59,130,246,0.08)');
+  grad.addColorStop(1, 'rgba(13,15,26,0.0)');
+  joyCtx.fillStyle = grad;
+  joyCtx.fill();
+  joyCtx.strokeStyle = 'rgba(59,130,246,0.25)';
+  joyCtx.lineWidth = 1.5;
+  joyCtx.stroke();
+
+  // Grid lines
+  joyCtx.strokeStyle = 'rgba(255,255,255,0.07)';
+  joyCtx.lineWidth = 1;
+  joyCtx.beginPath();
+  joyCtx.moveTo(cx - R, cy); joyCtx.lineTo(cx + R, cy);
+  joyCtx.moveTo(cx, cy - R); joyCtx.lineTo(cx, cy + R);
+  joyCtx.stroke();
+
+  // Dead-zone circle
+  joyCtx.beginPath();
+  joyCtx.arc(cx, cy, R * 0.15, 0, Math.PI * 2);
+  joyCtx.strokeStyle = 'rgba(234,179,8,0.3)';
+  joyCtx.lineWidth = 1;
+  joyCtx.stroke();
+
+  // Direction indicator line
+  const dx = (pan / maxCmd) * R * 0.75;
+  const dy = (tilt / maxCmd) * R * 0.75;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist > 1) {
+    joyCtx.beginPath();
+    joyCtx.moveTo(cx, cy);
+    joyCtx.lineTo(cx + dx, cy + dy);
+    const lineGrad = joyCtx.createLinearGradient(cx, cy, cx + dx, cy + dy);
+    lineGrad.addColorStop(0, 'rgba(6,182,212,0.2)');
+    lineGrad.addColorStop(1, 'rgba(6,182,212,0.85)');
+    joyCtx.strokeStyle = lineGrad;
+    joyCtx.lineWidth = 2.5;
+    joyCtx.stroke();
+  }
+
+  // Dot
+  const dotX = cx + dx;
+  const dotY = cy + dy;
+  joyCtx.beginPath();
+  joyCtx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+  const dotGrad = joyCtx.createRadialGradient(dotX, dotY, 0, dotX, dotY, dotR);
+  const active = dist > 1;
+  dotGrad.addColorStop(0, active ? '#fff' : 'rgba(100,116,139,0.8)');
+  dotGrad.addColorStop(0.5, active ? '#06b6d4' : 'rgba(100,116,139,0.5)');
+  dotGrad.addColorStop(1, active ? 'rgba(6,182,212,0.3)' : 'transparent');
+  joyCtx.fillStyle = dotGrad;
+  joyCtx.fill();
+  if (active) {
+    joyCtx.shadowColor = '#06b6d4';
+    joyCtx.shadowBlur = 12;
+    joyCtx.fill();
+    joyCtx.shadowBlur = 0;
+  }
+
+  // Label
+  joyCtx.fillStyle = 'rgba(100,116,139,0.7)';
+  joyCtx.font = `600 ${Math.max(9, w * 0.045)}px Outfit, sans-serif`;
+  joyCtx.textAlign = 'center';
+  joyCtx.fillText(`Pan ${pan > 0 ? '+' : ''}${pan}  Tilt ${tilt > 0 ? '+' : ''}${tilt}`, cx, h - 8);
+}
+
+window.addEventListener('resize', resizeJoystick);
+setTimeout(resizeJoystick, 100);
+
+/* ── Overlay canvas (bounding box + crosshair) ───────────────────────────── */
+const ovCv = document.getElementById('overlay-canvas');
+const ovCtx = ovCv.getContext('2d');
+
+function resizeOverlay() {
+  const container = document.getElementById('feed-container');
+  ovCv.width = container.clientWidth;
+  ovCv.height = container.clientHeight;
+}
+
+window.addEventListener('resize', resizeOverlay);
+
+function drawOverlay() {
+  resizeOverlay();
+  const cw = ovCv.width, ch = ovCv.height;
+  ovCtx.clearRect(0, 0, cw, ch);
+
+  const fw = state.frame_w || 640;
+  const fh = state.frame_h || 480;
+  const sx = cw / fw;
+  const sy = ch / fh;
+  const cx = cw / 2, cy = ch / 2;
+
+  // ── Crosshair center ──
+  ovCtx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ovCtx.lineWidth = 1;
+  const cs = 12;
+  ovCtx.beginPath();
+  ovCtx.moveTo(cx - cs, cy); ovCtx.lineTo(cx + cs, cy);
+  ovCtx.moveTo(cx, cy - cs); ovCtx.lineTo(cx, cy + cs);
+  ovCtx.stroke();
+
+  // ── Hold zone ──
+  const hx = (state.frame_w ? 22 : 22) * sx;
+  const hy = (state.frame_h ? 30 : 30) * sy;
+  ovCtx.strokeStyle = 'rgba(234,179,8,0.45)';
+  ovCtx.lineWidth = 1;
+  ovCtx.setLineDash([4, 4]);
+  ovCtx.strokeRect(cx - hx, cy - hy, hx * 2, hy * 2);
+  ovCtx.setLineDash([]);
+
+  if (!state.bbox) return;
+
+  const [x1, y1, x2, y2] = state.bbox;
+  const bx1 = x1 * sx, by1 = y1 * sy, bx2 = x2 * sx, by2 = y2 * sy;
+  const bw = bx2 - bx1, bh = by2 - by1;
+
+  // ── Bounding box ──
+  const statusColors = {
+    TRACK: '#06b6d4', HOLD: '#22c55e', LOCKING: '#eab308',
+    'NO TARGET': '#ef4444', COASTING: '#f97316',
+  };
+  const col = statusColors[state.status] || '#06b6d4';
+
+  ovCtx.strokeStyle = col;
+  ovCtx.lineWidth = 2;
+  ovCtx.shadowColor = col;
+  ovCtx.shadowBlur = 8;
+  ovCtx.strokeRect(bx1, by1, bw, bh);
+  ovCtx.shadowBlur = 0;
+
+  // Corner accents
+  const cs2 = Math.min(bw, bh, 20) * 0.3;
+  ovCtx.lineWidth = 3;
+  [[bx1, by1, 1, 1], [bx2, by1, -1, 1], [bx1, by2, 1, -1], [bx2, by2, -1, -1]].forEach(([cx2, cy2, dx, dy]) => {
+    ovCtx.beginPath();
+    ovCtx.moveTo(cx2 + dx * cs2, cy2);
+    ovCtx.lineTo(cx2, cy2);
+    ovCtx.lineTo(cx2, cy2 + dy * cs2);
+    ovCtx.stroke();
+  });
+
+  // Label
+  ovCtx.fillStyle = col;
+  ovCtx.font = 'bold 11px JetBrains Mono, monospace';
+  ovCtx.textAlign = 'left';
+  ovCtx.textBaseline = 'bottom';
+  const label = `${state.cls_name || 'target'} ${(state.confidence * 100).toFixed(0)}%`;
+  const tw = ovCtx.measureText(label).width + 8;
+  ovCtx.fillStyle = 'rgba(0,0,0,0.6)';
+  ovCtx.fillRect(bx1, by1 - 18, tw, 18);
+  ovCtx.fillStyle = col;
+  ovCtx.fillText(label, bx1 + 4, by1 - 3);
+
+  // Smooth center dot
+  if (state.smooth_x != null) {
+    const sx2 = state.smooth_x * sx, sy2 = state.smooth_y * sy;
+    ovCtx.beginPath();
+    ovCtx.arc(sx2, sy2, 5, 0, Math.PI * 2);
+    ovCtx.fillStyle = 'rgba(239,68,68,0.9)';
+    ovCtx.shadowColor = '#ef4444';
+    ovCtx.shadowBlur = 8;
+    ovCtx.fill();
+    ovCtx.shadowBlur = 0;
+  }
+}
+
+/* ── MJPEG Feed ─────────────────────────────────────────────────────────── */
+function onFeedLoaded() {
+  document.getElementById('video-feed').style.display = 'block';
+  document.getElementById('no-feed-msg').style.display = 'none';
+  document.getElementById('live-badge').style.display = '';
+  document.getElementById('fps-badge').style.display = '';
+  feedActive = true;
+}
+
+function onFeedError() {
+  // MJPEG failed — will rely on binary WebSocket frames
+}
+
+/* ── Binary frame from WebSocket ───────────────────────────────────────── */
+function renderBinaryFrame(buf) {
+  const blob = new Blob([buf], { type: 'image/jpeg' });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  img.onload = () => {
+    const cv = document.getElementById('frame-canvas');
+    if (!feedActive) {
+      // Only use canvas if MJPEG not working
+      cv.style.display = 'block';
+      cv.width = img.width;
+      cv.height = img.height;
+      const ctx = cv.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      document.getElementById('no-feed-msg').style.display = 'none';
+      document.getElementById('live-badge').style.display = '';
+      document.getElementById('fps-badge').style.display = '';
+    }
+    URL.revokeObjectURL(url);
+
+    // FPS estimate
+    const now = performance.now();
+    if (lastFrameTime) {
+      fpsEst = 0.8 * fpsEst + 0.2 * (1000 / (now - lastFrameTime));
+      document.getElementById('fps-badge').textContent = fpsEst.toFixed(0) + ' fps';
+    }
+    lastFrameTime = now;
+  };
+  img.src = url;
+}
+
+/* ── Event Log ───────────────────────────────────────────────────────────── */
+function addLog(msg, cls) {
+  const now = new Date();
+  const ts = now.toLocaleTimeString('en-IN', { hour12: false });
+  const el = document.createElement('div');
+  el.className = 'log-entry ' + (cls || '');
+  el.textContent = `[${ts}] ${msg}`;
+  const list = document.getElementById('log-list');
+  list.prepend(el);
+  // Keep max 60 entries
+  while (list.children.length > 60) list.removeChild(list.lastChild);
+}
+
+addLog('Dashboard initialized', 'hold');
+
+/* ── Demo / idle animation ──────────────────────────────────────────────── */
+// Keep drawing joystick even when idle so the canvas renders
+setInterval(() => {
+  if (!state.bbox) drawOverlay();
+  resizeJoystick();
+  drawJoystick(state.pan_delta, state.tilt_delta);
+}, 500);
+
+</script>
+</body>
+</html>
